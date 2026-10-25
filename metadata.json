@@ -1,0 +1,6 @@
+{
+  "name": "Numera",
+  "description": "Fast, offline-first mental-math training app with an adaptive Daily Workout, streak engine, arithmetic memory chains, multiplication tables, and 17 languages.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

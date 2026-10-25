@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Numera</string>
+    <string name="notif_channel_name">Daily Workout Reminders</string>
+    <string name="notif_channel_desc">Reminders for your daily mental-math workout and streak alerts</string>
+</resources>

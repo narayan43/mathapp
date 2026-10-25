@@ -1,0 +1,95 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile and synced preferences stored at /users/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "displayName": { "type": "string", "description": "User display name (1-50 chars)." },
+        "avatarId": { "type": "string", "description": "Preset avatar identifier or initials." },
+        "photoURL": { "type": "string", "description": "Optional Google photo URL." },
+        "email": { "type": "string", "description": "Optional user email address." },
+        "provider": { "type": "string", "description": "Authentication provider: google, email, or guest." },
+        "dailyGoal": { "type": "integer", "description": "Daily target question count (5-200)." },
+        "language": { "type": "string", "description": "Preferred ISO language code." },
+        "theme": { "type": "string", "description": "Appearance mode: LIGHT, DARK, or SYSTEM." },
+        "accentTheme": { "type": "string", "description": "Optional accent color theme identifier." },
+        "settingsJson": { "type": "string", "description": "Serialized user settings JSON." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update." }
+      },
+      "required": ["userId", "displayName", "avatarId", "dailyGoal", "language", "theme", "createdAt", "updatedAt"]
+    },
+    "DailyProgress": {
+      "title": "DailyProgress",
+      "description": "Synced adaptive skill levels, streak progress, and mistake book summary stored at /users/{userId}/progress/{docId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "streakCurrent": { "type": "integer", "description": "Current daily streak." },
+        "streakBest": { "type": "integer", "description": "Best daily streak." },
+        "freezesAvailable": { "type": "integer", "description": "Available streak freezes (0-2)." },
+        "lastCompletedDay": { "type": "string", "description": "YYYY-MM-DD of last completed daily workout." },
+        "skillsJson": { "type": "string", "description": "Serialized map of 6 skill levels & EMAs." },
+        "dailyStateJson": { "type": "string", "description": "Serialized DailyState snapshot." },
+        "mistakeBookJson": { "type": "string", "description": "Serialized mistake book and table stats summary." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update." }
+      },
+      "required": ["userId", "streakCurrent", "streakBest", "freezesAvailable", "skillsJson", "dailyStateJson", "createdAt", "updatedAt"]
+    },
+    "DaySyncDoc": {
+      "title": "DaySyncDoc",
+      "description": "Compact daily answer log and per-category aggregate document stored at /users/{userId}/days/{dayId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "day": { "type": "string", "description": "Local calendar date YYYY-MM-DD." },
+        "part": { "type": "integer", "description": "Shard index (1 for primary doc, 2+ if answers exceed 1500)." },
+        "totals": { "type": "object", "description": "Daily totals map {questions, correct, timeMs}." },
+        "categories": { "type": "object", "description": "Per-category aggregate map {category: {attempts, correct, totalTimeMs}}." },
+        "answers": { "type": "array", "description": "Compact answer entries [ts, op, category, level, expected, given, correct, timeMs] (max 1500)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update." }
+      },
+      "required": ["userId", "day", "totals", "categories", "answers", "createdAt", "updatedAt"]
+    },
+    "ScoreDoc": {
+      "title": "ScoreDoc",
+      "description": "Completed quiz session score record stored at /users/{userId}/scores/{scoreId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "mode": { "type": "string", "description": "Quiz mode name." },
+        "difficulty": { "type": "string", "description": "Difficulty level name." },
+        "count": { "type": "integer", "description": "Total questions in session." },
+        "correct": { "type": "integer", "description": "Correctly answered questions." },
+        "timeMs": { "type": "integer", "description": "Total elapsed time in milliseconds." },
+        "accuracy": { "type": "number", "description": "Accuracy ratio 0.0 to 1.0." },
+        "ts": { "type": "integer", "description": "Epoch timestamp in milliseconds." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp of last update." }
+      },
+      "required": ["userId", "mode", "difficulty", "count", "correct", "timeMs", "ts", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile and settings document owned by userId."
+    },
+    "/users/{userId}/progress/{docId}": {
+      "schema": "DailyProgress",
+      "description": "Adaptive daily workout progress, streak state, and mistake book summary owned by userId."
+    },
+    "/users/{userId}/days/{dayId}": {
+      "schema": "DaySyncDoc",
+      "description": "Compact daily totals, per-category aggregates, and up to 1500 answer log entries owned by userId."
+    },
+    "/users/{userId}/scores/{scoreId}": {
+      "schema": "ScoreDoc",
+      "description": "Quiz session score history documents owned by userId."
+    }
+  }
+}

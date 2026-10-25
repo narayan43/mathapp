@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer rounded badge frame inside 66dp safe zone (21..87) -->
+    <path
+        android:fillColor="#26FFFFFF"
+        android:pathData="M36,24h36c6.6,0 12,5.4 12,12v36c0,6.6 -5.4,12 -12,12H36c-6.6,0 -12,-5.4 -12,-12V36C24,29.4 29.4,24 36,24z" />
+    <!-- Plus symbol (top-left) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M39,33h4v6h6v4h-6v6h-4v-6h-6v-4h6z" />
+    <!-- Minus symbol (top-right) -->
+    <path
+        android:fillColor="#FF6DB0CE"
+        android:pathData="M61,39h14v4h-14z" />
+    <!-- Multiply symbol (bottom-left) -->
+    <path
+        android:fillColor="#FFF5A623"
+        android:pathData="M36.2,61.4l2.8,-2.8l4,4l4,-4l2.8,2.8l-4,4l4,4l-2.8,2.8l-4,-4l-4,4l-2.8,-2.8l4,-4z" />
+    <!-- Equals / Spark symbol (bottom-right) -->
+    <path
+        android:fillColor="#FF2CA58D"
+        android:pathData="M61,61h14v3.5h-14zM61,67.5h14v3.5h-14z" />
+    <!-- Center lightning spark -->
+    <path
+        android:fillColor="#FFF5A623"
+        android:pathData="M56,44L47,56h6l-2,10l10,-12h-6z" />
+</vector>
