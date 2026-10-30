@@ -43,7 +43,11 @@ abstract class FirestoreEmulatorTestBase {
         val dbIdRes = context.resources.getIdentifier("firestore_database_id", "string", context.packageName)
         databaseId = if (dbIdRes != 0) context.getString(dbIdRes) else "(default)"
 
-        db = FirebaseFirestore.getInstance(databaseId)
+        db = if (databaseId.isBlank() || databaseId == "(default)") {
+            FirebaseFirestore.getInstance()
+        } else {
+            FirebaseFirestore.getInstance(databaseId)
+        }
         try {
             db.useEmulator("127.0.0.1", 8085)
             db.firestoreSettings = FirebaseFirestoreSettings.Builder()
@@ -119,7 +123,14 @@ abstract class FirestoreEmulatorTestBase {
         if (!isEmulatorRunning) return
         runCatching { auth.signOut() }
         runCatching { clearFirestoreEmulatorData() }
-        runCatching { FirebaseFirestore.getInstance(databaseId).terminate() }
+        runCatching {
+            val firestore = if (databaseId.isBlank() || databaseId == "(default)") {
+                FirebaseFirestore.getInstance()
+            } else {
+                FirebaseFirestore.getInstance(databaseId)
+            }
+            firestore.terminate()
+        }
         runCatching { FirebaseApp.clearInstancesForTest() }
         runCatching { Shadows.shadowOf(Looper.getMainLooper()).idle() }
     }

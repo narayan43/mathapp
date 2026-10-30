@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Practice reminder",
   "settings.practice_reminder_sub": "Remind me at {{time}} on selected days",
   "settings.practice_reminder_time": "Reminder time",
-  "settings.practice_reminder_days": "Practice days"
+  "settings.practice_reminder_days": "Practice days",
+  "auth.instant_verify": "立即验证并进入",
+  "auth.instant_verify_sub": "没有收到电子邮件？轻触以立即继续。"
 }

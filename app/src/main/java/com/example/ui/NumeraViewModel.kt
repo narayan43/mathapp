@@ -98,12 +98,14 @@ sealed class ScreenRoute {
  * - Any signed-in user (including Guest) goes to Home (ScreenRoute.MainTabs) or their requested in-app route.
  */
 object AuthGuard {
-    fun canAccessProtectedRoute(authUser: AuthUser?): Boolean = authUser != null
+    fun canAccessProtectedRoute(authUser: AuthUser?, isGuestExpired: Boolean = false): Boolean =
+        authUser != null && !(authUser.isGuest && isGuestExpired)
 
     fun resolveRoute(
         authUser: AuthUser?,
         profile: UserProfileState,
-        requestedRoute: ScreenRoute = ScreenRoute.MainTabs
+        requestedRoute: ScreenRoute = ScreenRoute.MainTabs,
+        isGuestExpired: Boolean = false
     ): ScreenRoute {
         if (authUser == null) {
             return if (requestedRoute is ScreenRoute.AuthHub) {
@@ -111,6 +113,9 @@ object AuthGuard {
             } else {
                 ScreenRoute.AuthHub(isSignUpMode = false)
             }
+        }
+        if (authUser.isGuest && isGuestExpired) {
+            return ScreenRoute.AuthHub(isSignUpMode = true)
         }
         if (authUser.provider == "email" && !authUser.emailVerified) {
             return ScreenRoute.VerifyEmail
@@ -224,7 +229,10 @@ data class NumeraUiState(
     val smartPracticeCategoryFilter: String? = null,
     val lastSmartPracticeDeltas: List<CategoryBeforeAfterDelta> = emptyList(),
     val lastSmartPracticeResolvedMistakes: List<Problem> = emptyList(),
-    val toastMessage: String? = null
+    val toastMessage: String? = null,
+    val guestDaysRemaining: Int = 7,
+    val isGuestExpired: Boolean = false,
+    val showGuestExpiredDialog: Boolean = false
 )
 
 class NumeraViewModel(application: Application) : AndroidViewModel(application) {
@@ -242,7 +250,12 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
         val dbId = authService.getFirebaseEnvConfig().firestoreDatabaseId.ifBlank {
             application.getString(R.string.firestore_database_id)
         }
-        CloudSyncRepository(FirebaseFirestore.getInstance(dbId))
+        val firestore = if (dbId.isBlank() || dbId == "(default)") {
+            FirebaseFirestore.getInstance()
+        } else {
+            FirebaseFirestore.getInstance(dbId)
+        }
+        CloudSyncRepository(firestore)
     }.getOrNull()
 
     private var timerJob: Job? = null
@@ -304,10 +317,14 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
             storedProfile.copy(userId = "guest", isGuest = true, provider = "guest")
         }
 
+        val isGuestExpired = authService.isGuestExpired()
+        val daysLeft = authService.getGuestDaysRemaining()
+
         val initialRoute = AuthGuard.resolveRoute(
             authUser = initialAuthUser,
             profile = initialProfile,
-            requestedRoute = ScreenRoute.MainTabs
+            requestedRoute = ScreenRoute.MainTabs,
+            isGuestExpired = isGuestExpired
         )
         val initialSyncQueue = storage.loadSyncQueue(activeUserId)
 
@@ -325,6 +342,9 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                 mistakes = loadedMistakes,
                 customConfig = storage.loadCustomConfig(activeUserId),
                 tableStats = storage.loadTableStats(activeUserId),
+                guestDaysRemaining = daysLeft,
+                isGuestExpired = isGuestExpired,
+                showGuestExpiredDialog = (initialAuthUser?.isGuest == true && isGuestExpired),
                 dashboardSnapshot = initialSnapshot,
                 mistakeBook = initialMistakeBook,
                 rawAnswerLogs = initialRawLogs,
@@ -410,51 +430,78 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
      * and kept across restarts.
      */
     fun continueAsGuest() {
-        val current = authService.currentUser.value
-        val guestUser = if (current != null && current.isGuest) {
-            current
-        } else {
-            authService.signInAsGuest()
-        }
-        storage.setOnboardingDone(true)
-        storage.setActiveUser(guestUser.uid)
+        viewModelScope.launch {
+            _uiState.update { it.copy(authLoading = true, authError = null) }
 
-        // If legacy "guest" key had progress and this is the first time using guestUser.uid, copy it
-        if (guestUser.uid != "guest" && !storage.hasGuestProgress(guestUser.uid) && storage.hasGuestProgress("guest")) {
-            storage.copyUserLocalData("guest", guestUser.uid)
-            answerLogService.copyOrMergeUserAnalytics("guest", guestUser.uid, deleteSource = false)
-        }
+            if (authService.isGuestExpired()) {
+                _uiState.update {
+                    it.copy(
+                        authLoading = false,
+                        isGuestExpired = true,
+                        showGuestExpiredDialog = true,
+                        route = ScreenRoute.AuthHub(isSignUpMode = true),
+                        toastMessage = t("auth.guest_card_sub")
+                    )
+                }
+                return@launch
+            }
 
-        val guestSettings = storage.loadSettings(guestUser.uid)
-        val todayStr = LocalDate.now().toString()
-        val guestMistakes = storage.loadMistakes(guestUser.uid)
-        answerLogService.seedMistakeBookFromLegacyMistakes(guestUser.uid, guestMistakes)
-        val guestDaily = loadOrBuildTodayDailyState(todayStr, storage.getOrCreateInstallId(), guestSettings)
-        val guestProfile = storage.loadUserProfile(guestUser.uid).copy(
-            userId = guestUser.uid,
-            isGuest = true,
-            displayName = storage.loadUserProfile(guestUser.uid).displayName.ifBlank { "Guest" },
-            provider = "guest",
-            emailVerified = true
-        )
-        storage.saveUserProfile(guestProfile, guestUser.uid)
+            val current = authService.currentUser.value
+            val guestUser = if (current != null && current.isGuest) {
+                current
+            } else {
+                authService.signInAsGuest()
+            }
+            storage.setOnboardingDone(true)
+            storage.setActiveUser(guestUser.uid)
 
-        _uiState.update {
-            it.copy(
-                route = AuthGuard.resolveRoute(guestUser, guestProfile, ScreenRoute.MainTabs),
-                isAuthenticated = true,
-                authError = null,
-                authLoading = false,
-                userProfile = guestProfile,
-                settings = guestSettings,
-                dailyState = guestDaily,
-                scores = storage.loadScoresForUser(guestUser.uid),
-                mistakes = guestMistakes,
-                customConfig = storage.loadCustomConfig(guestUser.uid),
-                tableStats = storage.loadTableStats(guestUser.uid)
+            // If legacy "guest" key had progress and this is the first time using guestUser.uid, copy it
+            if (guestUser.uid != "guest" && !storage.hasGuestProgress(guestUser.uid) && storage.hasGuestProgress("guest")) {
+                storage.copyUserLocalData("guest", guestUser.uid)
+                answerLogService.copyOrMergeUserAnalytics("guest", guestUser.uid, deleteSource = false)
+            }
+
+            val guestSettings = storage.loadSettings(guestUser.uid)
+            val todayStr = LocalDate.now().toString()
+            val guestMistakes = storage.loadMistakes(guestUser.uid)
+            answerLogService.seedMistakeBookFromLegacyMistakes(guestUser.uid, guestMistakes)
+            val guestDaily = loadOrBuildTodayDailyState(todayStr, storage.getOrCreateInstallId(), guestSettings)
+            val guestProfile = storage.loadUserProfile(guestUser.uid).copy(
+                userId = guestUser.uid,
+                isGuest = true,
+                displayName = storage.loadUserProfile(guestUser.uid).displayName.ifBlank { "Guest" },
+                provider = "guest",
+                emailVerified = true
             )
+            storage.saveUserProfile(guestProfile, guestUser.uid)
+
+            val daysRemaining = authService.getGuestDaysRemaining()
+            val isExpired = authService.isGuestExpired()
+
+            _uiState.update {
+                it.copy(
+                    route = AuthGuard.resolveRoute(guestUser, guestProfile, ScreenRoute.MainTabs, isGuestExpired = isExpired),
+                    isAuthenticated = true,
+                    authError = null,
+                    authLoading = false,
+                    userProfile = guestProfile,
+                    settings = guestSettings,
+                    dailyState = guestDaily,
+                    scores = storage.loadScoresForUser(guestUser.uid),
+                    mistakes = guestMistakes,
+                    customConfig = storage.loadCustomConfig(guestUser.uid),
+                    tableStats = storage.loadTableStats(guestUser.uid),
+                    guestDaysRemaining = daysRemaining,
+                    isGuestExpired = isExpired,
+                    showGuestExpiredDialog = isExpired
+                )
+            }
+            refreshAnalyticsState(guestUser.uid)
         }
-        refreshAnalyticsState(guestUser.uid)
+    }
+
+    fun dismissGuestExpiredDialog() {
+        _uiState.update { it.copy(showGuestExpiredDialog = false) }
     }
 
     fun openAuthHub(isSignUp: Boolean = false) {
@@ -537,7 +584,7 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                     _uiState.update {
                         it.copy(
                             authLoading = false,
-                            authError = resolveAuthErrorMessage(e)
+                            authError = e.localizedMessage ?: e.message ?: resolveAuthErrorMessage(e)
                         )
                     }
                 }
@@ -580,10 +627,12 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 },
                 onFailure = { e ->
+                    val errMsg = e.localizedMessage ?: e.message ?: resolveAuthErrorMessage(e)
                     _uiState.update {
                         it.copy(
                             authLoading = false,
-                            authError = resolveAuthErrorMessage(e)
+                            authError = errMsg,
+                            toastMessage = errMsg
                         )
                     }
                 }
@@ -714,7 +763,7 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                         _uiState.update {
                             it.copy(
                                 authLoading = false,
-                                authError = t("auth.err_unverified_email")
+                                authError = "Email is still not verified. Please click the link in your inbox/spam folder."
                             )
                         }
                     }
@@ -723,7 +772,7 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                     _uiState.update {
                         it.copy(
                             authLoading = false,
-                            authError = resolveAuthErrorMessage(e)
+                            authError = e.localizedMessage ?: e.message ?: resolveAuthErrorMessage(e)
                         )
                     }
                 }
@@ -758,151 +807,164 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun handleAuthOutcome(outcome: AuthOutcome) {
-        val authUser = outcome.user
-        val guestUid = outcome.linkedFromGuestUid ?: "guest"
-        val hadGuestData = storage.hasGuestProgress(guestUid)
-        val guestSettings = storage.loadSettings(guestUid)
-        val todayStr = LocalDate.now().toString()
-        val guestDaily = storage.loadDailyState(todayStr, guestSettings, guestUid)
-        val guestScores = storage.loadScoresForUser(guestUid)
-        val guestMistakes = storage.loadMistakes(guestUid)
-        val guestTableStats = storage.loadTableStats(guestUid)
-
-        storage.setOnboardingDone(true)
-        storage.setActiveUser(authUser.uid)
-
-        val isFirebaseSignedIn = runCatching { Firebase.auth.currentUser?.uid == authUser.uid }.getOrDefault(false)
-        val repo = cloudRepo
-        val syncQueue = storage.loadSyncQueue(authUser.uid)
-
-        // One-time pull on login on a new device (progress/daily, last 30 days docs, scores)
-        val pulledData = if (isFirebaseSignedIn && repo != null && !syncQueue.initialPullDone && isDeviceOnline()) {
-            runCatching { repo.pullInitialUserData(authUser.uid, daysLimit = 30) }.getOrNull()
-        } else null
-
-        val cloudProfile = pulledData?.profile
-        val cloudProgress = pulledData?.dailyProgress
-        val cloudDays = pulledData?.dayDocs ?: emptyList()
-        val cloudScores = pulledData?.scores ?: emptyList()
-
-        if (pulledData != null) {
-            storage.markInitialPullDone(authUser.uid)
-        }
-
-        val localSavedProfile = storage.loadUserProfile(authUser.uid)
-        val hasExistingAccountData = cloudProgress != null || cloudDays.isNotEmpty() ||
-            (outcome.accountAlreadyExisted && (storage.hasGuestProgress(authUser.uid) || localSavedProfile.isProfileComplete))
-
-        val resolvedName = cloudProfile?.displayName?.ifBlank { null }
-            ?: localSavedProfile.displayName.ifBlank { null }
-            ?: authUser.displayName
-        val resolvedAvatar = cloudProfile?.avatarId?.ifBlank { null }
-            ?: localSavedProfile.avatarId.ifBlank { "fox" }
-        val resolvedGoal = cloudProfile?.dailyGoal ?: localSavedProfile.dailyGoal
-        val resolvedAppearance = cloudProfile?.theme?.let {
-            runCatching { AppearanceMode.valueOf(it) }.getOrNull()
-        } ?: localSavedProfile.appearanceMode
-
-        val isProfileAlreadyComplete = when {
-            cloudProfile != null -> true
-            localSavedProfile.isProfileComplete -> true
-            authUser.provider == "email" && resolvedName.isNotBlank() -> true
-            authUser.provider == "google" && !outcome.isNewUser && hasExistingAccountData -> true
-            else -> false
-        }
-
-        val newProfileState = UserProfileState(
-            userId = authUser.uid,
-            isGuest = false,
-            displayName = resolvedName,
-            avatarId = resolvedAvatar,
-            email = authUser.email ?: cloudProfile?.email,
-            provider = authUser.provider,
-            emailVerified = authUser.emailVerified,
-            dailyGoal = resolvedGoal,
-            lastSyncedTimestamp = localSavedProfile.lastSyncedTimestamp,
-            lastSyncDay = localSavedProfile.lastSyncDay,
-            isProfileComplete = isProfileAlreadyComplete,
-            appearanceMode = resolvedAppearance
-        )
-        storage.saveUserProfile(newProfileState, authUser.uid)
-
-        val targetRoute = AuthGuard.resolveRoute(authUser, newProfileState, ScreenRoute.MainTabs)
-
-        // If guest had local progress AND the target account already existed with data -> ask ONCE to merge
-        if (outcome.linkedFromGuestUid != null && hadGuestData && hasExistingAccountData && guestUid != authUser.uid) {
-            pendingGuestUidForMerge = guestUid
-            pendingCloudProfileForMerge = cloudProfile
-            pendingCloudProgressForMerge = cloudProgress
-            pendingCloudDaysForMerge = cloudDays
-            pendingCloudScoresForMerge = cloudScores
-            _uiState.update {
-                it.copy(
-                    isAuthenticated = true,
-                    authLoading = false,
-                    authError = null,
-                    userProfile = newProfileState,
-                    showGuestMergePrompt = true,
-                    route = targetRoute
-                )
+        try {
+            val authUser = outcome.user
+            if (outcome.sendEmailError != null) {
+                _uiState.update { it.copy(authError = outcome.sendEmailError) }
             }
-            return
-        }
+            val guestUid = outcome.linkedFromGuestUid ?: "guest"
+            val hadGuestData = storage.hasGuestProgress(guestUid)
+            val guestSettings = storage.loadSettings(guestUid)
+            val todayStr = LocalDate.now().toString()
+            val guestDaily = storage.loadDailyState(todayStr, guestSettings, guestUid)
+            val guestScores = storage.loadScoresForUser(guestUid)
+            val guestMistakes = storage.loadMistakes(guestUid)
+            val guestTableStats = storage.loadTableStats(guestUid)
 
-        if (cloudProgress != null || cloudDays.isNotEmpty()) {
-            applyCloudDataToLocal(
-                uid = authUser.uid,
-                cloudProfile = cloudProfile,
-                cloudProgress = cloudProgress,
-                cloudDays = cloudDays,
-                cloudScores = cloudScores,
-                profileState = newProfileState,
-                authUser = authUser
-            )
-        } else {
-            // Link/transfer guest progress directly to this account and queue for first sync!
-            val migratedSettings = guestSettings.copy(
-                dailyGoalQuestions = resolvedGoal,
+            storage.setOnboardingDone(true)
+            storage.setActiveUser(authUser.uid)
+
+            val isFirebaseSignedIn = runCatching { Firebase.auth.currentUser?.uid == authUser.uid }.getOrDefault(false)
+            val repo = cloudRepo
+            val syncQueue = storage.loadSyncQueue(authUser.uid)
+
+            // One-time pull on login on a new device (progress/daily, last 30 days docs, scores)
+            val pulledData = if (isFirebaseSignedIn && repo != null && !syncQueue.initialPullDone && isDeviceOnline()) {
+                runCatching { repo.pullInitialUserData(authUser.uid, daysLimit = 30) }.getOrNull()
+            } else null
+
+            val cloudProfile = pulledData?.profile
+            val cloudProgress = pulledData?.dailyProgress
+            val cloudDays = pulledData?.dayDocs ?: emptyList()
+            val cloudScores = pulledData?.scores ?: emptyList()
+
+            if (pulledData != null) {
+                storage.markInitialPullDone(authUser.uid)
+            }
+
+            val localSavedProfile = storage.loadUserProfile(authUser.uid)
+            val hasExistingAccountData = cloudProgress != null || cloudDays.isNotEmpty() ||
+                (outcome.accountAlreadyExisted && (storage.hasGuestProgress(authUser.uid) || localSavedProfile.isProfileComplete))
+
+            val resolvedName = cloudProfile?.displayName?.ifBlank { null }
+                ?: localSavedProfile.displayName.ifBlank { null }
+                ?: authUser.displayName
+            val resolvedAvatar = cloudProfile?.avatarId?.ifBlank { null }
+                ?: localSavedProfile.avatarId.ifBlank { "fox" }
+            val resolvedGoal = cloudProfile?.dailyGoal ?: localSavedProfile.dailyGoal
+            val resolvedAppearance = cloudProfile?.theme?.let {
+                runCatching { AppearanceMode.valueOf(it) }.getOrNull()
+            } ?: localSavedProfile.appearanceMode
+
+            val isProfileAlreadyComplete = when {
+                cloudProfile != null -> true
+                localSavedProfile.isProfileComplete -> true
+                authUser.provider == "email" && resolvedName.isNotBlank() -> true
+                authUser.provider == "google" && !outcome.isNewUser && hasExistingAccountData -> true
+                else -> false
+            }
+
+            val newProfileState = UserProfileState(
+                userId = authUser.uid,
+                isGuest = false,
+                displayName = resolvedName,
+                avatarId = resolvedAvatar,
+                email = authUser.email ?: cloudProfile?.email,
+                provider = authUser.provider,
+                emailVerified = authUser.emailVerified,
+                dailyGoal = resolvedGoal,
+                lastSyncedTimestamp = localSavedProfile.lastSyncedTimestamp,
+                lastSyncDay = localSavedProfile.lastSyncDay,
+                isProfileComplete = isProfileAlreadyComplete,
                 appearanceMode = resolvedAppearance
             )
-            val migratedDaily = guestDaily ?: loadOrBuildTodayDailyState(todayStr, storage.getOrCreateInstallId(), migratedSettings)
-            storage.saveSettings(migratedSettings, authUser.uid)
-            storage.saveDailyState(migratedDaily, authUser.uid)
-            storage.saveScores(guestScores, authUser.uid)
-            storage.saveMistakes(guestMistakes, authUser.uid)
-            storage.saveTableStats(guestTableStats, authUser.uid)
-            if (guestUid != authUser.uid) {
-                answerLogService.copyOrMergeUserAnalytics(guestUid, authUser.uid, deleteSource = true)
-                storage.clearUserLocalData(guestUid)
+            storage.saveUserProfile(newProfileState, authUser.uid)
+
+            val targetRoute = AuthGuard.resolveRoute(authUser, newProfileState, ScreenRoute.MainTabs)
+
+            // If guest had local progress AND the target account already existed with data -> ask ONCE to merge
+            if (outcome.linkedFromGuestUid != null && hadGuestData && hasExistingAccountData && guestUid != authUser.uid) {
+                pendingGuestUidForMerge = guestUid
+                pendingCloudProfileForMerge = cloudProfile
+                pendingCloudProgressForMerge = cloudProgress
+                pendingCloudDaysForMerge = cloudDays
+                pendingCloudScoresForMerge = cloudScores
+                _uiState.update {
+                    it.copy(
+                        isAuthenticated = true,
+                        authLoading = false,
+                        authError = null,
+                        userProfile = newProfileState,
+                        showGuestMergePrompt = true,
+                        route = targetRoute
+                    )
+                }
+                return
             }
-            answerLogService.seedMistakeBookFromLegacyMistakes(authUser.uid, guestMistakes)
 
-            val allDays = answerLogService.getDistinctDaysForUser(authUser.uid)
-            val allScoreIds = guestScores.map { it.id }.toSet()
-            storage.markAllDirtyForUser(
-                days = allDays,
-                scoreIds = allScoreIds,
-                userId = authUser.uid
-            )
+            if (cloudProgress != null || cloudDays.isNotEmpty()) {
+                applyCloudDataToLocal(
+                    uid = authUser.uid,
+                    cloudProfile = cloudProfile,
+                    cloudProgress = cloudProgress,
+                    cloudDays = cloudDays,
+                    cloudScores = cloudScores,
+                    profileState = newProfileState,
+                    authUser = authUser
+                )
+            } else {
+                // Link/transfer guest progress directly to this account and queue for first sync!
+                val migratedSettings = guestSettings.copy(
+                    dailyGoalQuestions = resolvedGoal,
+                    appearanceMode = resolvedAppearance
+                )
+                val migratedDaily = guestDaily ?: loadOrBuildTodayDailyState(todayStr, storage.getOrCreateInstallId(), migratedSettings)
+                storage.saveSettings(migratedSettings, authUser.uid)
+                storage.saveDailyState(migratedDaily, authUser.uid)
+                storage.saveScores(guestScores, authUser.uid)
+                storage.saveMistakes(guestMistakes, authUser.uid)
+                storage.saveTableStats(guestTableStats, authUser.uid)
+                if (guestUid != authUser.uid) {
+                    answerLogService.copyOrMergeUserAnalytics(guestUid, authUser.uid, deleteSource = true)
+                    storage.clearUserLocalData(guestUid)
+                }
+                answerLogService.seedMistakeBookFromLegacyMistakes(authUser.uid, guestMistakes)
 
+                val allDays = answerLogService.getDistinctDaysForUser(authUser.uid)
+                val allScoreIds = guestScores.map { it.id }.toSet()
+                storage.markAllDirtyForUser(
+                    days = allDays,
+                    scoreIds = allScoreIds,
+                    userId = authUser.uid
+                )
+
+                _uiState.update {
+                    it.copy(
+                        isAuthenticated = true,
+                        authLoading = false,
+                        authError = null,
+                        userProfile = newProfileState,
+                        settings = migratedSettings,
+                        dailyState = migratedDaily,
+                        scores = guestScores,
+                        mistakes = guestMistakes,
+                        tableStats = guestTableStats,
+                        syncStatus = computeSyncStatus(authUser.uid, false),
+                        route = targetRoute
+                    )
+                }
+                refreshAnalyticsState(authUser.uid)
+                if (newProfileState.isProfileComplete && authUser.emailVerified) {
+                    maybeRunDailySync(forceUploadAllIfFirstSync = true)
+                }
+            }
+        } catch (e: Throwable) {
+            runCatching { android.util.Log.e("NumeraAuth", "Exception in handleAuthOutcome", e) }
             _uiState.update {
                 it.copy(
-                    isAuthenticated = true,
                     authLoading = false,
-                    authError = null,
-                    userProfile = newProfileState,
-                    settings = migratedSettings,
-                    dailyState = migratedDaily,
-                    scores = guestScores,
-                    mistakes = guestMistakes,
-                    tableStats = guestTableStats,
-                    syncStatus = computeSyncStatus(authUser.uid, false),
-                    route = targetRoute
+                    authError = e.localizedMessage ?: "Authentication completed with an error"
                 )
-            }
-            refreshAnalyticsState(authUser.uid)
-            if (newProfileState.isProfileComplete && authUser.emailVerified) {
-                maybeRunDailySync(forceUploadAllIfFirstSync = true)
             }
         }
     }
@@ -1224,31 +1286,46 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isSyncing = true, lastSyncErrorMessage = null) }
-            val (success, syncedAnswers) = executeBatchSync(uid = uid, isManual = true)
-            val refreshedQueue = storage.loadSyncQueue(uid)
-            val errorMsg = cloudRepo?.lastSyncErrorMessage
-            if (!success && errorMsg != null) {
-                runCatching {
-                    android.util.Log.e("NumeraSync", "Manual sync failed for $uid: $errorMsg")
+            try {
+                _uiState.update { it.copy(isSyncing = true, lastSyncErrorMessage = null) }
+                val (success, syncedAnswers) = executeBatchSync(uid = uid, isManual = true)
+                val refreshedQueue = storage.loadSyncQueue(uid)
+                val errorMsg = cloudRepo?.lastSyncErrorMessage
+                if (!success && errorMsg != null) {
+                    runCatching {
+                        android.util.Log.e("NumeraSync", "Manual sync failed for $uid: $errorMsg")
+                    }
                 }
-            }
-            val toastText = if (success) {
-                t("auth.sync_pushed_toast", mapOf("count" to syncedAnswers.toString()))
-            } else if (!errorMsg.isNullOrBlank()) {
-                "Sync error: $errorMsg"
-            } else {
-                t("auth.err_network")
-            }
-            _uiState.update {
-                it.copy(
-                    isSyncing = false,
-                    syncStatus = computeSyncStatus(uid, it.userProfile.isGuest),
-                    pendingSyncItemsCount = computePendingSyncItemsCount(uid, it.rawAnswerLogs),
-                    lastManualSyncMs = refreshedQueue.lastManualSyncMs,
-                    lastSyncErrorMessage = if (success) null else errorMsg,
-                    toastMessage = toastText
-                )
+                val toastText = if (success) {
+                    t("auth.sync_pushed_toast", mapOf("count" to syncedAnswers.toString()))
+                } else if (!errorMsg.isNullOrBlank()) {
+                    "Sync error: $errorMsg"
+                } else {
+                    t("auth.err_network")
+                }
+                _uiState.update {
+                    it.copy(
+                        isSyncing = false,
+                        syncStatus = computeSyncStatus(uid, it.userProfile.isGuest),
+                        pendingSyncItemsCount = computePendingSyncItemsCount(uid, it.rawAnswerLogs),
+                        lastManualSyncMs = refreshedQueue.lastManualSyncMs,
+                        lastSyncErrorMessage = if (success) null else errorMsg,
+                        toastMessage = toastText
+                    )
+                }
+            } catch (e: Throwable) {
+                runCatching { android.util.Log.e("NumeraSync", "Exception in pushMyDataNow", e) }
+                val refreshedQueue = storage.loadSyncQueue(uid)
+                _uiState.update {
+                    it.copy(
+                        isSyncing = false,
+                        syncStatus = computeSyncStatus(uid, it.userProfile.isGuest),
+                        pendingSyncItemsCount = computePendingSyncItemsCount(uid, it.rawAnswerLogs),
+                        lastManualSyncMs = refreshedQueue.lastManualSyncMs,
+                        lastSyncErrorMessage = e.localizedMessage ?: "Sync error",
+                        toastMessage = "Sync error: ${e.localizedMessage ?: "Network issue"}"
+                    )
+                }
             }
         }
     }
@@ -1294,13 +1371,17 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         viewModelScope.launch {
-            val (ok, _) = executeBatchSync(uid = uid, isManual = false)
-            if (!ok) {
-                val err = cloudRepo?.lastSyncErrorMessage
-                if (!err.isNullOrBlank()) {
-                    runCatching { android.util.Log.e("NumeraSync", "Auto sync error: $err") }
-                    _uiState.update { it.copy(lastSyncErrorMessage = err, toastMessage = "Sync error: $err") }
+            try {
+                val (ok, _) = executeBatchSync(uid = uid, isManual = false)
+                if (!ok) {
+                    val err = cloudRepo?.lastSyncErrorMessage
+                    if (!err.isNullOrBlank()) {
+                        runCatching { android.util.Log.e("NumeraSync", "Auto sync error: $err") }
+                        _uiState.update { it.copy(lastSyncErrorMessage = err) }
+                    }
                 }
+            } catch (e: Throwable) {
+                runCatching { android.util.Log.e("NumeraSync", "Auto sync exception: ${e.message}", e) }
             }
         }
     }
@@ -1316,7 +1397,12 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun executeBatchSync(uid: String, isManual: Boolean): Pair<Boolean, Int> {
         val st = _uiState.value
         val profile = st.userProfile
-        if (profile.provider == "email" && !profile.emailVerified) return false to 0
+        val fbCurrentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        val isEmailProvider = profile.provider == "email" ||
+            (fbCurrentUser != null && fbCurrentUser.providerData.any { it.providerId == "password" })
+        if (isEmailProvider && (fbCurrentUser?.isEmailVerified == false || !profile.emailVerified)) {
+            return false to 0
+        }
         if (!isDeviceOnline()) {
             refreshSyncStatusInUi()
             return false to 0
@@ -1456,7 +1542,9 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
             scores = scoreDocs
         )
 
-        val committed = repo.syncDailyBatch(targetCloudUid, planned)
+        val committed = runCatching {
+            repo.syncDailyBatch(targetCloudUid, planned)
+        }.getOrDefault(false)
         if (committed) {
             val nowMs = System.currentTimeMillis()
             val syncedOriginalScoreIds = dirtyScores.filter { sc ->

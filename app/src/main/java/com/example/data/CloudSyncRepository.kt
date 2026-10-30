@@ -5,6 +5,7 @@ import com.example.core.AnswerLogService
 import com.example.core.DailyCategoryAggregate
 import com.example.core.OperationType
 import com.example.core.handleFirestoreError
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
@@ -336,6 +337,13 @@ class CloudSyncRepository(
     suspend fun syncDailyBatch(uid: String, payload: PlannedBatchPayload): Boolean {
         lastSyncErrorMessage = null
         if (payload.totalOpsCount <= 0) return true
+        val fbCurrentUser = runCatching { FirebaseAuth.getInstance().currentUser }.getOrNull()
+        val isEmailProvider = payload.profile?.provider == "email" ||
+            (fbCurrentUser != null && fbCurrentUser.providerData.any { it.providerId == "password" })
+        if (isEmailProvider && fbCurrentUser?.isEmailVerified == false) {
+            lastSyncErrorMessage = "Cannot write profile to Cloud Firestore until email is verified"
+            return false
+        }
         val userPath = "users/$uid"
         return try {
             val batch = db.batch()
@@ -371,7 +379,9 @@ class CloudSyncRepository(
             runCatching {
                 android.util.Log.e("NumeraSync", "Firestore syncDailyBatch failed for $userPath: ${e.message}", e)
             }
-            handleFirestoreError(e, OperationType.WRITE, userPath)
+            runCatching {
+                handleFirestoreError(e, OperationType.WRITE, userPath)
+            }
             false
         }
     }
@@ -380,10 +390,10 @@ class CloudSyncRepository(
      * One-time pull on login on a new device: pulls profile, progress/daily, last 30 days docs, and scores.
      */
     suspend fun pullInitialUserData(uid: String, daysLimit: Int = 30): PulledCloudData {
-        val profile = getUserProfile(uid)
-        val daily = getDailyProgress(uid)
-        val days = listDaySyncDocs(uid, daysLimit)
-        val scores = listScores(uid)
+        val profile = runCatching { getUserProfile(uid) }.getOrNull()
+        val daily = runCatching { getDailyProgress(uid) }.getOrNull()
+        val days = runCatching { listDaySyncDocs(uid, daysLimit) }.getOrDefault(emptyList())
+        val scores = runCatching { listScores(uid) }.getOrDefault(emptyList())
         return PulledCloudData(
             profile = profile,
             dailyProgress = daily,

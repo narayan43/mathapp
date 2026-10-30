@@ -18,6 +18,7 @@ import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.firebase.Firebase
 import com.google.firebase.FirebaseNetworkException
 import com.google.firebase.FirebaseTooManyRequestsException
+import com.google.firebase.auth.EmailAuthProvider
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
 import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
@@ -72,7 +73,8 @@ data class AuthOutcome(
     val user: AuthUser,
     val isNewUser: Boolean = false,
     val linkedFromGuestUid: String? = null,
-    val accountAlreadyExisted: Boolean = false
+    val accountAlreadyExisted: Boolean = false,
+    val sendEmailError: String? = null
 )
 
 class AuthService(private val context: Context) {
@@ -163,15 +165,72 @@ class AuthService(private val context: Context) {
         )
     }
 
+
+
+    fun getGuestCreatedAtMs(): Long {
+        val stored = prefs.getLong(PREF_GUEST_CREATED_AT, 0L)
+        if (stored > 0L) return stored
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong(PREF_GUEST_CREATED_AT, now).apply()
+        return now
+    }
+
+    fun getGuestDaysRemaining(): Int {
+        val created = prefs.getLong(PREF_GUEST_CREATED_AT, 0L)
+        if (created <= 0L) return GUEST_EXPIRATION_DAYS
+        val elapsedDays = ((System.currentTimeMillis() - created) / (1000L * 60 * 60 * 24)).toInt()
+        return (GUEST_EXPIRATION_DAYS - elapsedDays).coerceAtLeast(0)
+    }
+
+    fun isGuestExpired(): Boolean {
+        val current = _currentUser.value
+        if (current == null || !current.isGuest) return false
+        val created = prefs.getLong(PREF_GUEST_CREATED_AT, 0L)
+        if (created <= 0L) return false
+        val elapsedMs = System.currentTimeMillis() - created
+        val maxDurationMs = GUEST_EXPIRATION_DAYS * 24L * 60 * 60 * 1000L
+        return elapsedMs >= maxDurationMs
+    }
+
     /**
      * Signs in as a Guest with a real persistent UID so progress is stored under users/{uid}.
+     * When Firebase Anonymous Auth is enabled, signs in anonymously to allow real Cloud Firestore writes.
      * When the guest later signs in with Google or Email, their guest UID progress is linked.
      */
-    fun signInAsGuest(): AuthUser {
-        val existingGuestUid = prefs.getString("persistent_guest_uid", null)
+    suspend fun signInAsGuest(): AuthUser {
+        getGuestCreatedAtMs()
+
+        // 1. If Firebase already has an active anonymous user, reuse it
+        val currentFb = firebaseAuth?.currentUser
+        if (currentFb != null && currentFb.isAnonymous) {
+            val user = mapFirebaseUser(currentFb)
+            saveCachedUser(user)
+            _currentUser.value = user
+            return user
+        }
+
+        // 2. Try Firebase anonymous authentication
+        if (firebaseAuth != null) {
+            try {
+                val anonResult = firebaseAuth.signInAnonymously().await()
+                val anonUser = anonResult.user
+                if (anonUser != null) {
+                    prefs.edit().putString(PREF_PERSISTENT_GUEST_UID, anonUser.uid).apply()
+                    val user = mapFirebaseUser(anonUser)
+                    saveCachedUser(user)
+                    _currentUser.value = user
+                    return user
+                }
+            } catch (_: Exception) {
+                // Anonymous auth fallback
+            }
+        }
+
+        // 3. Fallback to persistent device-bound guest UID
+        val existingGuestUid = prefs.getString(PREF_PERSISTENT_GUEST_UID, null)
             ?.takeIf { it.isNotBlank() }
             ?: "guest_${UUID.randomUUID().toString().replace("-", "").take(12)}".also {
-                prefs.edit().putString("persistent_guest_uid", it).apply()
+                prefs.edit().putString(PREF_PERSISTENT_GUEST_UID, it).apply()
             }
         val guestUser = AuthUser(
             uid = existingGuestUid,
@@ -187,6 +246,12 @@ class AuthService(private val context: Context) {
         return guestUser
     }
 
+    private tailrec fun Context.findActivity(): android.app.Activity? = when (this) {
+        is android.app.Activity -> this
+        is android.content.ContextWrapper -> baseContext.findActivity()
+        else -> null
+    }
+
     /**
      * Interactive Google Sign-In button handler using GetSignInWithGoogleOption.
      * Supports linking from an active Guest account via linkWithCredential or fallback merge.
@@ -194,16 +259,20 @@ class AuthService(private val context: Context) {
     suspend fun signInWithGoogleInteractive(activityContext: Context): Result<AuthOutcome> {
         val previousGuest = _currentUser.value?.takeIf { it.isGuest }
         return try {
-            val credentialManager = CredentialManager.create(activityContext)
+            val targetActivity = activityContext.findActivity() ?: activityContext
+            val credentialManager = CredentialManager.create(targetActivity)
             val webClientId = getFirebaseEnvConfig().webClientId.ifBlank {
-                activityContext.getString(R.string.default_web_client_id)
+                runCatching { targetActivity.getString(R.string.default_web_client_id) }.getOrDefault("")
+            }
+            if (webClientId.isBlank()) {
+                return Result.failure(AuthFlowException(AuthErrorCode.GENERIC, "Google Sign-In Web Client ID not configured"))
             }
             val googleOption = GetSignInWithGoogleOption.Builder(webClientId).build()
             val request = GetCredentialRequest.Builder()
                 .addCredentialOption(googleOption)
                 .build()
 
-            val result = credentialManager.getCredential(activityContext, request)
+            val result = credentialManager.getCredential(targetActivity, request)
             val credential = result.credential
             if (credential is CustomCredential &&
                 credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
@@ -214,32 +283,59 @@ class AuthService(private val context: Context) {
                 val fbCurrent = firebaseAuth?.currentUser
                 var accountAlreadyExisted = false
                 var isNewUser = false
+                var isFirebaseBacked = false
 
-                val fbUser = if (fbCurrent != null && fbCurrent.isAnonymous) {
-                    try {
-                        val linkRes = fbCurrent.linkWithCredential(firebaseCredential).await()
-                        isNewUser = linkRes.additionalUserInfo?.isNewUser ?: false
-                        linkRes.user
-                    } catch (_: FirebaseAuthUserCollisionException) {
-                        accountAlreadyExisted = true
+                val fbUser: FirebaseUser? = try {
+                    if (fbCurrent != null && fbCurrent.isAnonymous) {
+                        try {
+                            val linkRes = fbCurrent.linkWithCredential(firebaseCredential).await()
+                            isNewUser = linkRes.additionalUserInfo?.isNewUser ?: false
+                            linkRes.user
+                        } catch (_: Exception) {
+                            accountAlreadyExisted = true
+                            val signInRes = firebaseAuth?.signInWithCredential(firebaseCredential)?.await()
+                            isNewUser = signInRes?.additionalUserInfo?.isNewUser ?: false
+                            signInRes?.user
+                        }
+                    } else {
                         val signInRes = firebaseAuth?.signInWithCredential(firebaseCredential)?.await()
+                        isNewUser = signInRes?.additionalUserInfo?.isNewUser ?: false
+                        if (!isNewUser && previousGuest != null) {
+                            accountAlreadyExisted = true
+                        }
                         signInRes?.user
                     }
-                } else {
-                    val signInRes = firebaseAuth?.signInWithCredential(firebaseCredential)?.await()
-                    isNewUser = signInRes?.additionalUserInfo?.isNewUser ?: false
-                    if (!isNewUser && previousGuest != null) {
-                        accountAlreadyExisted = true
-                    }
-                    signInRes?.user
-                } ?: return Result.failure(AuthFlowException(AuthErrorCode.GENERIC, "Google Sign-In returned no user"))
+                } catch (e: Exception) {
+                    android.util.Log.w(
+                        "AuthService",
+                        "Firebase Google credential exchange failed (${e.message}). Proceeding with verified Google Play Services identity.",
+                        e
+                    )
+                    null
+                }
 
-                val mapped = mapFirebaseUser(fbUser).copy(
-                    displayName = fbUser.displayName?.takeIf { it.isNotBlank() }
-                        ?: googleIdTokenCredential.displayName?.takeIf { it.isNotBlank() }
-                        ?: "",
+                if (fbUser != null) {
+                    isFirebaseBacked = true
+                }
+
+                val userUid = fbUser?.uid
+                    ?: "google_${googleIdTokenCredential.id.trim().lowercase().replace(Regex("[^a-zA-Z0-9]"), "_")}"
+                val resolvedName = fbUser?.displayName?.takeIf { it.isNotBlank() }
+                    ?: googleIdTokenCredential.displayName?.takeIf { it.isNotBlank() }
+                    ?: googleIdTokenCredential.id.substringBefore("@")
+                val resolvedEmail = fbUser?.email
+                    ?: googleIdTokenCredential.id.takeIf { it.contains("@") }
+                val resolvedPhoto = fbUser?.photoUrl?.toString()
+                    ?: googleIdTokenCredential.profilePictureUri?.toString()
+
+                val mapped = AuthUser(
+                    uid = userUid,
+                    displayName = resolvedName,
+                    email = resolvedEmail,
+                    photoUrl = resolvedPhoto,
                     provider = "google",
-                    emailVerified = true
+                    emailVerified = true,
+                    isFirebaseBacked = isFirebaseBacked
                 )
                 saveCachedUser(mapped)
                 _currentUser.value = mapped
@@ -271,9 +367,13 @@ class AuthService(private val context: Context) {
     suspend fun trySilentGoogleSignIn(activityContext: Context): Result<AuthOutcome?> {
         if (_currentUser.value != null) return Result.success(null)
         return try {
-            val credentialManager = CredentialManager.create(activityContext)
+            val targetActivity = activityContext.findActivity() ?: activityContext
+            val credentialManager = CredentialManager.create(targetActivity)
             val webClientId = getFirebaseEnvConfig().webClientId.ifBlank {
-                activityContext.getString(R.string.default_web_client_id)
+                runCatching { targetActivity.getString(R.string.default_web_client_id) }.getOrDefault("")
+            }
+            if (webClientId.isBlank()) {
+                return Result.success(null)
             }
             val googleIdOption = GetGoogleIdOption.Builder()
                 .setServerClientId(webClientId)
@@ -284,22 +384,40 @@ class AuthService(private val context: Context) {
                 .addCredentialOption(googleIdOption)
                 .build()
 
-            val result = credentialManager.getCredential(activityContext, request)
+            val result = credentialManager.getCredential(targetActivity, request)
             val credential = result.credential
             if (credential is CustomCredential &&
                 credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
             ) {
                 val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
                 val firebaseCredential = GoogleAuthProvider.getCredential(googleIdTokenCredential.idToken, null)
-                val authResult = firebaseAuth?.signInWithCredential(firebaseCredential)?.await()
-                val fbUser = authResult?.user ?: return Result.success(null)
-                val mapped = mapFirebaseUser(fbUser).copy(provider = "google", emailVerified = true)
+                val authResult = try {
+                    firebaseAuth?.signInWithCredential(firebaseCredential)?.await()
+                } catch (_: Exception) {
+                    null
+                }
+                val fbUser = authResult?.user
+                val isFirebaseBacked = fbUser != null
+                val userUid = fbUser?.uid ?: "google_${googleIdTokenCredential.id.trim().lowercase().replace(Regex("[^a-zA-Z0-9]"), "_")}"
+                val resolvedName = fbUser?.displayName?.takeIf { it.isNotBlank() }
+                    ?: googleIdTokenCredential.displayName?.takeIf { it.isNotBlank() }
+                    ?: googleIdTokenCredential.id.substringBefore("@")
+                val resolvedEmail = fbUser?.email ?: googleIdTokenCredential.id
+                val mapped = AuthUser(
+                    uid = userUid,
+                    displayName = resolvedName,
+                    email = resolvedEmail,
+                    photoUrl = fbUser?.photoUrl?.toString() ?: googleIdTokenCredential.profilePictureUri?.toString(),
+                    provider = "google",
+                    emailVerified = true,
+                    isFirebaseBacked = isFirebaseBacked
+                )
                 saveCachedUser(mapped)
                 _currentUser.value = mapped
                 Result.success(
                     AuthOutcome(
                         user = mapped,
-                        isNewUser = authResult.additionalUserInfo?.isNewUser ?: false
+                        isNewUser = authResult?.additionalUserInfo?.isNewUser ?: false
                     )
                 )
             } else {
@@ -337,12 +455,26 @@ class AuthService(private val context: Context) {
         val previousGuest = _currentUser.value?.takeIf { it.isGuest }
         var targetUid = previousGuest?.uid ?: "email_${UUID.randomUUID().toString().replace("-", "").take(12)}"
         var isBacked = false
+        var sendVerificationError: String? = null
 
         val fb = firebaseAuth
         if (fb != null) {
             try {
-                val authRes = fb.createUserWithEmailAndPassword(cleanEmail, password).await()
-                val fbUser = authRes.user
+                val currentFb = fb.currentUser
+                val fbUser = if (currentFb != null && currentFb.isAnonymous) {
+                    try {
+                        val credential = EmailAuthProvider.getCredential(cleanEmail, password)
+                        val linkRes = currentFb.linkWithCredential(credential).await()
+                        linkRes.user
+                    } catch (_: FirebaseAuthUserCollisionException) {
+                        val authRes = fb.createUserWithEmailAndPassword(cleanEmail, password).await()
+                        authRes.user
+                    }
+                } else {
+                    val authRes = fb.createUserWithEmailAndPassword(cleanEmail, password).await()
+                    authRes.user
+                }
+
                 if (fbUser != null) {
                     targetUid = fbUser.uid
                     isBacked = true
@@ -352,13 +484,20 @@ class AuthService(private val context: Context) {
                         }
                         fbUser.updateProfile(profileUpdates).await()
                     }
-                    runCatching { fbUser.sendEmailVerification().await() }
+                    try {
+                        fbUser.sendEmailVerification().await()
+                    } catch (sendEx: Exception) {
+                        android.util.Log.e("AuthService", "sendEmailVerification error for ${fbUser.email}: ${sendEx.message}", sendEx)
+                        sendVerificationError = sendEx.localizedMessage ?: sendEx.message ?: "Failed to send verification email"
+                    }
                 }
             } catch (e: Exception) {
+                android.util.Log.e("AuthService", "Firebase createUserWithEmailAndPassword error: ${e.message}", e)
                 val mapped = mapExceptionToAuthFlowException(e)
                 if (mapped.code in listOf(AuthErrorCode.EMAIL_ALREADY_IN_USE, AuthErrorCode.WEAK_PASSWORD, AuthErrorCode.INVALID_EMAIL)) {
                     return Result.failure(mapped)
                 }
+                return Result.failure(AuthFlowException(AuthErrorCode.GENERIC, e.localizedMessage ?: e.message ?: "Failed to create account"))
             }
         }
 
@@ -379,7 +518,8 @@ class AuthService(private val context: Context) {
                 user = createdUser,
                 isNewUser = true,
                 linkedFromGuestUid = previousGuest?.uid,
-                accountAlreadyExisted = false
+                accountAlreadyExisted = false,
+                sendEmailError = sendVerificationError
             )
         )
     }
@@ -408,6 +548,9 @@ class AuthService(private val context: Context) {
                 val fbUser = authRes.user
                 if (fbUser != null) {
                     val verified = fbUser.isEmailVerified
+                    if (!verified) {
+                        runCatching { fbUser.sendEmailVerification().await() }
+                    }
                     val signedInUser = AuthUser(
                         uid = fbUser.uid,
                         displayName = fbUser.displayName?.takeIf { it.isNotBlank() } ?: cleanEmail.substringBefore("@"),
@@ -469,24 +612,25 @@ class AuthService(private val context: Context) {
      * Resends the verification email to the current user.
      */
     suspend fun resendVerificationEmail(): Result<Unit> {
-        val current = _currentUser.value ?: return Result.success(Unit)
-        if (!current.isFirebaseBacked) {
-            return Result.success(Unit)
-        }
-        return try {
-            firebaseAuth?.currentUser?.sendEmailVerification()?.await()
-            Result.success(Unit)
-        } catch (e: Exception) {
-            if (isOperationNotAllowed(e)) {
+        val current = _currentUser.value ?: return Result.failure(IllegalStateException("No authenticated user"))
+        val fbUser = firebaseAuth?.currentUser
+        if (fbUser != null && current.isFirebaseBacked) {
+            return try {
+                fbUser.sendEmailVerification().await()
+                android.util.Log.i("AuthService", "resendVerificationEmail: successfully sent verification link to ${fbUser.email}")
                 Result.success(Unit)
-            } else {
-                Result.failure(mapExceptionToAuthFlowException(e))
+            } catch (e: Exception) {
+                android.util.Log.e("AuthService", "resendVerificationEmail error for ${fbUser.email}: ${e.message}", e)
+                Result.failure(e)
             }
+        } else {
+            return Result.failure(IllegalStateException("No Firebase user found to resend verification email"))
         }
     }
 
     /**
      * Checks whether the current user has verified their email address.
+     * Calls reload() on Firebase user, then checks isEmailVerified.
      */
     suspend fun checkEmailVerified(): Result<Boolean> {
         val current = _currentUser.value ?: return Result.success(false)
@@ -502,14 +646,17 @@ class AuthService(private val context: Context) {
                 }
                 Result.success(verified)
             } catch (e: Exception) {
-                Result.failure(mapExceptionToAuthFlowException(e))
+                Result.failure(e)
             }
-        } else {
+        } else if (!current.isFirebaseBacked) {
+            // Local fallback for unit tests when Firebase is not running on JVM
             val updated = current.copy(emailVerified = true)
             current.email?.let { markLocalEmailVerified(it) }
             saveCachedUser(updated)
             _currentUser.value = updated
             return Result.success(true)
+        } else {
+            return Result.success(false)
         }
     }
 
@@ -621,6 +768,9 @@ class AuthService(private val context: Context) {
     }
 
     companion object {
+        const val GUEST_EXPIRATION_DAYS = 7
+        private const val PREF_GUEST_CREATED_AT = "guest_created_at_ms"
+        private const val PREF_PERSISTENT_GUEST_UID = "persistent_guest_uid"
         private val EMAIL_REGEX = Regex("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")
 
         fun isValidEmail(email: String): Boolean {

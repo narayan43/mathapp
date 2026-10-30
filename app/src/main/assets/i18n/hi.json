@@ -407,5 +407,7 @@
   "settings.practice_reminder": "अभ्यास रिमाइंडर",
   "settings.practice_reminder_sub": "चुने गए दिनों में {{time}} बजे याद दिलाएँ",
   "settings.practice_reminder_time": "रिमाइंडर समय",
-  "settings.practice_reminder_days": "अभ्यास के दिन"
+  "settings.practice_reminder_days": "अभ्यास के दिन",
+  "auth.instant_verify": "तुरंत सत्यापित करें और शुरू करें",
+  "auth.instant_verify_sub": "ईमेल नहीं मिला? जारी रखने के लिए टैप करें।"
 }

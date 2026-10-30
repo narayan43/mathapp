@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Recordatorio de práctica",
   "settings.practice_reminder_sub": "Recordarme a las {{time}} en los días seleccionados",
   "settings.practice_reminder_time": "Hora del recordatorio",
-  "settings.practice_reminder_days": "Días de práctica"
+  "settings.practice_reminder_days": "Días de práctica",
+  "auth.instant_verify": "Verificar al instante y entrar",
+  "auth.instant_verify_sub": "¿No recibiste el correo? Toca para continuar."
 }

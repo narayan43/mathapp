@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Напоминание о тренировке",
   "settings.practice_reminder_sub": "Напоминать в {{time}} в выбранные дни",
   "settings.practice_reminder_time": "Время напоминания",
-  "settings.practice_reminder_days": "Дни тренировок"
+  "settings.practice_reminder_days": "Дни тренировок",
+  "auth.instant_verify": "Подтвердить мгновенно и войти",
+  "auth.instant_verify_sub": "Не получили письмо? Нажмите для продолжения."
 }

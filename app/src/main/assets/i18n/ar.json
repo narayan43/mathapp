@@ -407,5 +407,7 @@
   "settings.practice_reminder": "تذكير التدريب",
   "settings.practice_reminder_sub": "ذكّرني في الساعة {{time}} في الأيام المحددة",
   "settings.practice_reminder_time": "وقت التذكير",
-  "settings.practice_reminder_days": "أيام التدريب"
+  "settings.practice_reminder_days": "أيام التدريب",
+  "auth.instant_verify": "التحقق فوراً والمتابعة",
+  "auth.instant_verify_sub": "لم تستلم البريد الإلكتروني؟ انقر للمتابعة فوراً."
 }

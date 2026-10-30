@@ -272,5 +272,12 @@ class ExampleRobolectricTest {
             assertTrue(resetRes.isSuccess)
         }
     }
+
+    @Test
+    fun `NumeraViewModel instantiates cleanly`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.NumeraViewModel(app)
+        org.junit.Assert.assertNotNull(vm)
+    }
 }
 

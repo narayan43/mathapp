@@ -18,8 +18,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -463,6 +465,57 @@ fun GuestMergePromptDialog(
                 modifier = Modifier.testTag("merge_cloud_only_btn")
             ) {
                 Text(cloudOnlyButtonText)
+            }
+        }
+    )
+}
+
+/**
+ * Dialog shown when the 7-day guest trial has expired, directing the user to connect with Google or Email
+ * to keep their progress and workouts.
+ */
+@Composable
+fun GuestExpiredPromptDialog(
+    title: String,
+    body: String,
+    onSignInWithGoogle: () -> Unit,
+    onSignInWithEmail: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { /* Modal: require login */ },
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Lock,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text(text = title, style = MaterialTheme.typography.titleLarge)
+        },
+        text = {
+            Text(text = body, style = MaterialTheme.typography.bodyMedium)
+        },
+        confirmButton = {
+            Button(
+                onClick = onSignInWithGoogle,
+                modifier = Modifier.testTag("expired_google_signin_btn")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AccountCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Google Sign-In")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onSignInWithEmail,
+                modifier = Modifier.testTag("expired_email_signin_btn")
+            ) {
+                Text("Email / Password")
             }
         }
     )

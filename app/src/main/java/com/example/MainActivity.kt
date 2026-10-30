@@ -28,15 +28,19 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.util.Log
+import androidx.activity.viewModels
 import com.example.ui.BottomTab
 import com.example.ui.NumeraViewModel
 import com.example.ui.ScreenRoute
+import com.example.ui.components.GuestExpiredPromptDialog
 import com.example.ui.components.GuestMergePromptDialog
 import com.example.ui.screens.ActiveQuizScreen
 import com.example.ui.screens.CategoryDetailScreen
@@ -57,19 +61,41 @@ import com.example.ui.screens.VerifyEmailScreen
 import com.example.ui.theme.NumeraTheme
 
 class MainActivity : ComponentActivity() {
+
+    private val viewModel: NumeraViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Apply persisted appearance background before first frame so there is no flash on cold start
+        super.onCreate(savedInstanceState)
+
+        // Install crash logging hook so any unexpected runtime errors are captured in logs
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e("NumeraCrash", "Fatal exception in Numera on ${thread.name}", throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
+        // Initialize Firebase safely if not already done by provider
+        runCatching {
+            if (com.google.firebase.FirebaseApp.getApps(this).isEmpty()) {
+                com.google.firebase.FirebaseApp.initializeApp(this)
+            }
+        }
+
+        // Apply edge-to-edge layout safely
+        runCatching {
+            enableEdgeToEdge()
+        }
+
+        // Apply persisted appearance background
         runCatching {
             val prefs = applicationContext.getSharedPreferences("numera_prefs", MODE_PRIVATE)
             val mode = prefs.getString("APPEARANCE_MODE", "LIGHT") ?: "LIGHT"
             val bgArgb = if (mode == "DARK") 0xFF151B21.toInt() else 0xFFF4F7FA.toInt()
             window.decorView.setBackgroundColor(bgArgb)
         }
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+
         setContent {
-            val vm: NumeraViewModel = viewModel()
-            NumeraApp(viewModel = vm)
+            NumeraApp(viewModel = viewModel)
         }
     }
 }
@@ -118,6 +144,19 @@ fun NumeraApp(viewModel: NumeraViewModel) {
                 cloudOnlyButtonText = viewModel.t("auth.merge_discard"),
                 onMergeConfirm = { viewModel.resolveGuestMergeChoice(mergeLocalIntoCloud = true) },
                 onCloudOnlyConfirm = { viewModel.resolveGuestMergeChoice(mergeLocalIntoCloud = false) }
+            )
+        }
+
+        if (uiState.showGuestExpiredDialog) {
+            val context = LocalContext.current
+            GuestExpiredPromptDialog(
+                title = viewModel.t("auth.guest_card_title"),
+                body = viewModel.t("auth.guest_card_sub"),
+                onSignInWithGoogle = { viewModel.signInWithGoogle(context) },
+                onSignInWithEmail = {
+                    viewModel.dismissGuestExpiredDialog()
+                    viewModel.openAuthHub(isSignUp = true)
+                }
             )
         }
 

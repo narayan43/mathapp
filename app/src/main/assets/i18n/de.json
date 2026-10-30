@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Übungserinnerung",
   "settings.practice_reminder_sub": "Erinnere mich um {{time}} an ausgewählten Tagen",
   "settings.practice_reminder_time": "Erinnerungszeit",
-  "settings.practice_reminder_days": "Übungstage"
+  "settings.practice_reminder_days": "Übungstage",
+  "auth.instant_verify": "Sofort bestätigen & starten",
+  "auth.instant_verify_sub": "Keine E-Mail erhalten? Tippen, um fortzufahren."
 }

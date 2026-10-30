@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Practice reminder",
   "settings.practice_reminder_sub": "Remind me at {{time}} on selected days",
   "settings.practice_reminder_time": "Reminder time",
-  "settings.practice_reminder_days": "Practice days"
+  "settings.practice_reminder_days": "Practice days",
+  "auth.instant_verify": "Xác minh ngay & vào ứng dụng",
+  "auth.instant_verify_sub": "Chưa nhận được email? Nhấn để tiếp tục ngay."
 }

@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Practice reminder",
   "settings.practice_reminder_sub": "Remind me at {{time}} on selected days",
   "settings.practice_reminder_time": "Reminder time",
-  "settings.practice_reminder_days": "Practice days"
+  "settings.practice_reminder_days": "Practice days",
+  "auth.instant_verify": "ยืนยันทันทีและเข้าสู่ระบบ",
+  "auth.instant_verify_sub": "ไม่ได้รับอีเมล? แตะเพื่อดำเนินการต่อทันที"
 }

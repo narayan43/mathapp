@@ -136,7 +136,7 @@ fun HomeScreen(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(viewModel.t("auth.log_in"), fontWeight = FontWeight.Bold)
+                            Text("Guest (${uiState.guestDaysRemaining}d)", fontWeight = FontWeight.Bold)
                         }
                     } else {
                         PresetAvatarBadge(
@@ -147,6 +147,60 @@ fun HomeScreen(
                                 .clickable { viewModel.selectBottomTab(BottomTab.SETTINGS) }
                                 .testTag("header_avatar_badge")
                         )
+                    }
+                }
+            }
+        }
+
+        if (uiState.userProfile.isGuest) {
+            item {
+                Card(
+                    onClick = { viewModel.openAuthHub(isSignUp = true) },
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("guest_trial_banner_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AccountCircle,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Guest Mode (${uiState.guestDaysRemaining} days remaining)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            Text(
+                                text = viewModel.t("auth.guest_card_sub"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = { viewModel.openAuthHub(isSignUp = true) },
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.heightIn(min = 36.dp)
+                        ) {
+                            Text(viewModel.t("auth.backup_btn"), style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
             }

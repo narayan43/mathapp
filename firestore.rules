@@ -32,21 +32,30 @@ service cloud.firestore {
       return data.keys().size() >= 1 && data.keys().size() <= maxKeys;
     }
 
+    // 7-day limit for anonymous guests: permanent providers (google, password, email) have no expiration
+    function isGuestActive(createdTimestamp) {
+      return !('sign_in_provider' in request.auth.token.firebase) ||
+             request.auth.token.firebase.sign_in_provider != 'anonymous' ||
+             createdTimestamp == null ||
+             !(createdTimestamp is timestamp) ||
+             (request.time < createdTimestamp + duration.value(7, 'd'));
+    }
+
     function isValidUserProfile(data) {
       return isSaneDocSize(data, 15) &&
              data.userId is string && data.userId == request.auth.uid &&
-             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
              data.avatarId is string && data.avatarId.size() >= 1 && data.avatarId.size() <= 40 &&
              (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() <= 600)) &&
              (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 160)) &&
-             (!('provider' in data) || data.provider == null || (data.provider is string && data.provider in ['google', 'email', 'guest'])) &&
+             (!('provider' in data) || data.provider == null || (data.provider is string && data.provider in ['google', 'email', 'guest', 'anonymous', 'firebase'])) &&
              data.dailyGoal is int && data.dailyGoal >= 5 && data.dailyGoal <= 200 &&
              data.language is string && data.language.size() >= 2 && data.language.size() <= 12 &&
              data.theme is string && data.theme.size() >= 2 && data.theme.size() <= 32 &&
              (!('accentTheme' in data) || data.accentTheme == null || (data.accentTheme is string && data.accentTheme.size() <= 32)) &&
              (!('settingsJson' in data) || (data.settingsJson is string && data.settingsJson.size() <= 12000)) &&
-             data.createdAt is timestamp && data.createdAt <= request.time &&
-             data.updatedAt is timestamp && data.updatedAt <= request.time;
+             (!('createdAt' in data) || data.createdAt == null || (data.createdAt is timestamp && data.createdAt <= request.time)) &&
+             (!('updatedAt' in data) || data.updatedAt == null || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
 
     function isValidDailyProgress(data) {
@@ -59,8 +68,8 @@ service cloud.firestore {
              data.skillsJson is string && data.skillsJson.size() <= 12000 &&
              data.dailyStateJson is string && data.dailyStateJson.size() <= 80000 &&
              (!('mistakeBookJson' in data) || data.mistakeBookJson == null || (data.mistakeBookJson is string && data.mistakeBookJson.size() <= 120000)) &&
-             data.createdAt is timestamp && data.createdAt <= request.time &&
-             data.updatedAt is timestamp && data.updatedAt <= request.time;
+             (!('createdAt' in data) || data.createdAt == null || (data.createdAt is timestamp && data.createdAt <= request.time)) &&
+             (!('updatedAt' in data) || data.updatedAt == null || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
 
     function isValidDaySyncDoc(data) {
@@ -71,8 +80,8 @@ service cloud.firestore {
              data.totals is map && data.totals.keys().size() <= 10 &&
              data.categories is map && data.categories.keys().size() <= 64 &&
              data.answers is list && data.answers.size() <= 1500 &&
-             data.createdAt is timestamp && data.createdAt <= request.time &&
-             data.updatedAt is timestamp && data.updatedAt <= request.time;
+             (!('createdAt' in data) || data.createdAt == null || (data.createdAt is timestamp && data.createdAt <= request.time)) &&
+             (!('updatedAt' in data) || data.updatedAt == null || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
 
     function isValidScoreDoc(data) {
@@ -85,8 +94,8 @@ service cloud.firestore {
              data.timeMs is int && data.timeMs >= 0 && data.timeMs <= 7200000 &&
              (!('accuracy' in data) || (data.accuracy is number && data.accuracy >= 0.0 && data.accuracy <= 1.0)) &&
              data.ts is int && data.ts >= 0 &&
-             data.createdAt is timestamp && data.createdAt <= request.time &&
-             data.updatedAt is timestamp && data.updatedAt <= request.time;
+             (!('createdAt' in data) || data.createdAt == null || (data.createdAt is timestamp && data.createdAt <= request.time)) &&
+             (!('updatedAt' in data) || data.updatedAt == null || (data.updatedAt is timestamp && data.updatedAt <= request.time));
     }
 
     match /users/{userId} {
@@ -94,15 +103,17 @@ service cloud.firestore {
 
       allow create: if isOwner(userId) &&
                        isValidId(userId) &&
-                       incoming().keys().hasAll(['userId', 'displayName', 'avatarId', 'dailyGoal', 'language', 'theme', 'createdAt', 'updatedAt']) &&
+                       (!('createdAt' in incoming()) || isGuestActive(incoming().createdAt)) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'avatarId', 'dailyGoal', 'language', 'theme']) &&
                        incoming().keys().hasOnly(['userId', 'displayName', 'avatarId', 'photoURL', 'email', 'provider', 'dailyGoal', 'language', 'theme', 'accentTheme', 'settingsJson', 'createdAt', 'updatedAt']) &&
                        isValidUserProfile(incoming());
 
       allow update: if isOwner(userId) &&
                        isValidId(userId) &&
+                       (!('createdAt' in existing()) || isGuestActive(existing().createdAt)) &&
                        isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarId', 'photoURL', 'email', 'provider', 'dailyGoal', 'language', 'theme', 'accentTheme', 'settingsJson', 'createdAt', 'updatedAt']);
+                       incoming().diff(existing()).affectedKeys().hasOnly(['userId', 'displayName', 'avatarId', 'photoURL', 'email', 'provider', 'dailyGoal', 'language', 'theme', 'accentTheme', 'settingsJson', 'createdAt', 'updatedAt']);
 
       allow delete: if false;
 
@@ -113,16 +124,18 @@ service cloud.firestore {
         allow create: if isOwner(userId) &&
                          isValidId(userId) &&
                          isValidId(docId) &&
-                         incoming().keys().hasAll(['userId', 'streakCurrent', 'streakBest', 'freezesAvailable', 'skillsJson', 'dailyStateJson', 'createdAt', 'updatedAt']) &&
+                         (!('createdAt' in incoming()) || isGuestActive(incoming().createdAt)) &&
+                         incoming().keys().hasAll(['userId', 'streakCurrent', 'streakBest', 'freezesAvailable', 'skillsJson', 'dailyStateJson']) &&
                          incoming().keys().hasOnly(['userId', 'streakCurrent', 'streakBest', 'freezesAvailable', 'lastCompletedDay', 'skillsJson', 'dailyStateJson', 'mistakeBookJson', 'createdAt', 'updatedAt']) &&
                          isValidDailyProgress(incoming());
 
         allow update: if isOwner(userId) &&
                          isValidId(userId) &&
                          isValidId(docId) &&
+                         (!('createdAt' in existing()) || isGuestActive(existing().createdAt)) &&
                          isValidDailyProgress(incoming()) &&
                          incoming().userId == existing().userId &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['streakCurrent', 'streakBest', 'freezesAvailable', 'lastCompletedDay', 'skillsJson', 'dailyStateJson', 'mistakeBookJson', 'createdAt', 'updatedAt']);
+                         incoming().diff(existing()).affectedKeys().hasOnly(['userId', 'streakCurrent', 'streakBest', 'freezesAvailable', 'lastCompletedDay', 'skillsJson', 'dailyStateJson', 'mistakeBookJson', 'createdAt', 'updatedAt']);
 
         allow delete: if false;
       }
@@ -134,17 +147,19 @@ service cloud.firestore {
         allow create: if isOwner(userId) &&
                          isValidId(userId) &&
                          isValidId(dayId) &&
-                         incoming().keys().hasAll(['userId', 'day', 'totals', 'categories', 'answers', 'createdAt', 'updatedAt']) &&
+                         (!('createdAt' in incoming()) || isGuestActive(incoming().createdAt)) &&
+                         incoming().keys().hasAll(['userId', 'day', 'totals', 'categories', 'answers']) &&
                          incoming().keys().hasOnly(['userId', 'day', 'part', 'totals', 'categories', 'answers', 'createdAt', 'updatedAt']) &&
                          isValidDaySyncDoc(incoming());
 
         allow update: if isOwner(userId) &&
                          isValidId(userId) &&
                          isValidId(dayId) &&
+                         (!('createdAt' in existing()) || isGuestActive(existing().createdAt)) &&
                          isValidDaySyncDoc(incoming()) &&
                          incoming().userId == existing().userId &&
                          incoming().day == existing().day &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['part', 'totals', 'categories', 'answers', 'createdAt', 'updatedAt']);
+                         incoming().diff(existing()).affectedKeys().hasOnly(['userId', 'day', 'part', 'totals', 'categories', 'answers', 'createdAt', 'updatedAt']);
 
         allow delete: if false;
       }
@@ -156,16 +171,18 @@ service cloud.firestore {
         allow create: if isOwner(userId) &&
                          isValidId(userId) &&
                          isValidId(scoreId) &&
-                         incoming().keys().hasAll(['userId', 'mode', 'difficulty', 'count', 'correct', 'timeMs', 'ts', 'createdAt', 'updatedAt']) &&
+                         (!('createdAt' in incoming()) || isGuestActive(incoming().createdAt)) &&
+                         incoming().keys().hasAll(['userId', 'mode', 'difficulty', 'count', 'correct', 'timeMs', 'ts']) &&
                          incoming().keys().hasOnly(['userId', 'mode', 'difficulty', 'count', 'correct', 'timeMs', 'accuracy', 'ts', 'createdAt', 'updatedAt']) &&
                          isValidScoreDoc(incoming());
 
         allow update: if isOwner(userId) &&
                          isValidId(userId) &&
                          isValidId(scoreId) &&
+                         (!('createdAt' in existing()) || isGuestActive(existing().createdAt)) &&
                          isValidScoreDoc(incoming()) &&
                          incoming().userId == existing().userId &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['mode', 'difficulty', 'count', 'correct', 'timeMs', 'accuracy', 'ts', 'createdAt', 'updatedAt']);
+                         incoming().diff(existing()).affectedKeys().hasOnly(['userId', 'mode', 'difficulty', 'count', 'correct', 'timeMs', 'accuracy', 'ts', 'createdAt', 'updatedAt']);
 
         allow delete: if false;
       }

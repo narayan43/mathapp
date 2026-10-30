@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Rappel d'entraînement",
   "settings.practice_reminder_sub": "Me rappeler à {{time}} les jours sélectionnés",
   "settings.practice_reminder_time": "Heure du rappel",
-  "settings.practice_reminder_days": "Jours d'entraînement"
+  "settings.practice_reminder_days": "Jours d'entraînement",
+  "auth.instant_verify": "Vérifier instantanément et entrer",
+  "auth.instant_verify_sub": "Vous n'avez pas reçu l'e-mail ? Appuyez pour continuer."
 }

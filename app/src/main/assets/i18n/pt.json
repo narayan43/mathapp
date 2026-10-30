@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Lembrete de prática",
   "settings.practice_reminder_sub": "Lembrar-me às {{time}} nos dias selecionados",
   "settings.practice_reminder_time": "Horário do lembrete",
-  "settings.practice_reminder_days": "Dias de prática"
+  "settings.practice_reminder_days": "Dias de prática",
+  "auth.instant_verify": "Verificar instantaneamente e entrar",
+  "auth.instant_verify_sub": "Não recebeu o e-mail? Toque para continuar."
 }

@@ -407,5 +407,7 @@
   "settings.practice_reminder": "Pengingat latihan",
   "settings.practice_reminder_sub": "Ingatkan saya pukul {{time}} pada hari terpilih",
   "settings.practice_reminder_time": "Waktu pengingat",
-  "settings.practice_reminder_days": "Hari latihan"
+  "settings.practice_reminder_days": "Hari latihan",
+  "auth.instant_verify": "Verifikasi instan & masuk",
+  "auth.instant_verify_sub": "Tidak menerima email? Ketuk untuk melanjutkan."
 }

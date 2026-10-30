@@ -1,7 +1,7 @@
 {
   "firestore": [
     {
-      "database": "ai-studio-android-numera-b60fbfa3-de85-4588-bbc8-1cc63f453ff1",
+      "database": "(default)",
       "rules": "firestore.rules"
     }
   ],
