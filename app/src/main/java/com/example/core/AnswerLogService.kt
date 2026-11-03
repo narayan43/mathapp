@@ -33,7 +33,8 @@ data class AnswerLog(
     val timeMs: Long,       // time from question shown to answer submitted
     val attempts: Int = 1,
     val source: String,     // 'normal'|'daily'|'mistake-replay'|'data-practice-mistake'|'data-practice-new'
-    val sessionId: String
+    val sessionId: String,
+    val isSynced: Boolean = false
 )
 
 /**
@@ -73,7 +74,7 @@ class AnswerLogService(context: Context) {
 
     companion object {
         private const val DB_NAME = "numera_answer_logs.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
         const val MAX_SPEED_TIME_MS = 60_000L
 
         val SPACED_INTERVAL_DAYS = listOf(1L, 3L, 7L, 14L)
@@ -337,7 +338,8 @@ class AnswerLogService(context: Context) {
                     time_ms INTEGER NOT NULL,
                     attempts INTEGER NOT NULL,
                     source TEXT NOT NULL,
-                    session_id TEXT NOT NULL
+                    session_id TEXT NOT NULL,
+                    is_synced INTEGER NOT NULL DEFAULT 0
                 )
                 """.trimIndent()
             )
@@ -345,6 +347,7 @@ class AnswerLogService(context: Context) {
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_logs_user_cat ON answer_logs(user_id, category)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_logs_user_op ON answer_logs(user_id, op)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_logs_user_ts ON answer_logs(user_id, ts DESC)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_logs_user_synced ON answer_logs(user_id, is_synced)")
 
             db.execSQL(
                 """
@@ -387,6 +390,14 @@ class AnswerLogService(context: Context) {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            if (oldVersion < 2) {
+                try {
+                    db.execSQL("ALTER TABLE answer_logs ADD COLUMN is_synced INTEGER NOT NULL DEFAULT 0")
+                } catch (_: Exception) {}
+                try {
+                    db.execSQL("CREATE INDEX IF NOT EXISTS idx_logs_user_synced ON answer_logs(user_id, is_synced)")
+                } catch (_: Exception) {}
+            }
             onCreate(db)
         }
     }
@@ -428,6 +439,7 @@ class AnswerLogService(context: Context) {
                 put("attempts", log.attempts)
                 put("source", log.source)
                 put("session_id", log.sessionId)
+                put("is_synced", if (log.isSynced) 1 else 0)
             }
             db.insertWithOnConflict("answer_logs", null, values, SQLiteDatabase.CONFLICT_REPLACE)
 
@@ -588,6 +600,64 @@ class AnswerLogService(context: Context) {
         return days
     }
 
+    fun getUnsyncedAnswerCount(userId: String): Int {
+        val db = dbHelper.readableDatabase
+        return runCatching {
+            db.rawQuery(
+                "SELECT COUNT(*) FROM answer_logs WHERE user_id = ? AND is_synced = 0",
+                arrayOf(userId)
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
+        }.getOrDefault(0)
+    }
+
+    fun getUnsyncedDays(userId: String): Set<String> {
+        val db = dbHelper.readableDatabase
+        val days = mutableSetOf<String>()
+        runCatching {
+            db.rawQuery(
+                "SELECT DISTINCT day FROM answer_logs WHERE user_id = ? AND is_synced = 0",
+                arrayOf(userId)
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val d = cursor.getString(0)
+                    if (!d.isNullOrBlank()) days.add(d)
+                }
+            }
+        }
+        return days
+    }
+
+    fun markAnswersSynced(userId: String, ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val db = dbHelper.writableDatabase
+        db.beginTransaction()
+        try {
+            val cv = ContentValues().apply { put("is_synced", 1) }
+            for (chunk in ids.chunked(300)) {
+                val placeholders = chunk.joinToString(",") { "?" }
+                val args = (listOf(userId) + chunk).toTypedArray()
+                db.update("answer_logs", cv, "user_id = ? AND id IN ($placeholders)", args)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun markDayAnswersSynced(userId: String, day: String) {
+        val db = dbHelper.writableDatabase
+        val cv = ContentValues().apply { put("is_synced", 1) }
+        db.update("answer_logs", cv, "user_id = ? AND day = ?", arrayOf(userId, day))
+    }
+
+    fun markAllAnswersSynced(userId: String) {
+        val db = dbHelper.writableDatabase
+        val cv = ContentValues().apply { put("is_synced", 1) }
+        db.update("answer_logs", cv, "user_id = ?", arrayOf(userId))
+    }
+
     fun mergePulledDayData(
         userId: String,
         day: String,
@@ -622,8 +692,9 @@ class AnswerLogService(context: Context) {
                     put("attempts", log.attempts)
                     put("source", log.source)
                     put("session_id", log.sessionId)
+                    put("is_synced", 1)
                 }
-                val res = db.insertWithOnConflict("answer_logs", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+                val res = db.insertWithOnConflict("answer_logs", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
                 if (res != -1L) insertedLogs++
             }
 
@@ -1010,6 +1081,8 @@ class AnswerLogService(context: Context) {
         val attempts = cursor.getInt(cursor.getColumnIndexOrThrow("attempts"))
         val source = cursor.getString(cursor.getColumnIndexOrThrow("source"))
         val sessionId = cursor.getString(cursor.getColumnIndexOrThrow("session_id"))
+        val syncIdx = cursor.getColumnIndex("is_synced")
+        val isSynced = if (syncIdx != -1 && !cursor.isNull(syncIdx)) cursor.getInt(syncIdx) == 1 else false
 
         return AnswerLog(
             id = id,
@@ -1028,7 +1101,8 @@ class AnswerLogService(context: Context) {
             timeMs = timeMs,
             attempts = attempts,
             source = source,
-            sessionId = sessionId
+            sessionId = sessionId,
+            isSynced = isSynced
         )
     }
 

@@ -651,28 +651,24 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun computePendingSyncItemsCount(
-        userId: String = _uiState.value.userProfile.userId,
-        rawLogs: List<AnswerLog> = _uiState.value.rawAnswerLogs
+        userId: String = storage.getActiveUser(),
+        rawLogs: List<AnswerLog> = emptyList()
     ): Int {
         val queue = storage.loadSyncQueue(userId)
-        val dirtyAnswersCount = if (queue.dirtyDays.isNotEmpty()) {
-            rawLogs.count { it.day in queue.dirtyDays }
-        } else if (queue.lastSyncDay == null && rawLogs.isNotEmpty()) {
-            rawLogs.size
-        } else {
-            0
-        }
-        return queue.pendingItemsCount(dirtyAnswersCount)
+        val unsyncedAnswers = answerLogService.getUnsyncedAnswerCount(userId)
+        val dirtyScoresCount = queue.dirtyScoreIds.size
+        val dirtyProfileCount = if (queue.dirtyProfile) 1 else 0
+        val dirtyProgressCount = if (queue.dirtyDailyProgress) 1 else 0
+        return unsyncedAnswers + dirtyScoresCount + dirtyProfileCount + dirtyProgressCount
     }
 
     fun computeSyncStatus(
-        userId: String = _uiState.value.userProfile.userId,
-        isGuest: Boolean = _uiState.value.userProfile.isGuest
+        userId: String = storage.getActiveUser(),
+        isGuest: Boolean = false
     ): SyncStatusState {
         if (!isDeviceOnline()) return SyncStatusState.OFFLINE
-        val queue = storage.loadSyncQueue(userId)
-        val todayStr = LocalDate.now().toString()
-        return if (queue.lastSyncDay == todayStr && !queue.hasDirtyChanges) {
+        val pendingCount = computePendingSyncItemsCount(userId, emptyList())
+        return if (pendingCount == 0) {
             SyncStatusState.SYNCED
         } else {
             SyncStatusState.PENDING
@@ -1175,9 +1171,25 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
         storage.saveDailyState(mergedDaily, uid)
         storage.saveScores(mergedScores, uid)
 
+        val nowMs = System.currentTimeMillis()
+        val pulledDays = cloudDays.map { it.day.ifBlank { it.documentId }.substringBefore("_") }.toSet()
+        val pulledScoreIds = cloudScores.map { it.documentId }.toSet()
+
+        storage.clearDirtyFlagsAfterSync(
+            syncDay = todayStr,
+            syncedAtMs = nowMs,
+            isManual = false,
+            syncedProfile = true,
+            syncedDailyProgress = true,
+            syncedDays = pulledDays,
+            syncedScoreIds = pulledScoreIds,
+            userId = uid
+        )
+
         val updatedProfile = profileState.copy(
             appearanceMode = restoredSettings.appearanceMode,
-            lastSyncedTimestamp = profileState.lastSyncedTimestamp ?: System.currentTimeMillis()
+            lastSyncedTimestamp = nowMs,
+            lastSyncDay = todayStr
         )
         storage.saveUserProfile(updatedProfile, uid)
 
@@ -1190,7 +1202,9 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                 settings = restoredSettings,
                 dailyState = mergedDaily,
                 scores = mergedScores,
-                syncStatus = computeSyncStatus(uid, false),
+                syncStatus = SyncStatusState.SYNCED,
+                pendingSyncItemsCount = 0,
+                lastManualSyncMs = null,
                 route = AuthGuard.resolveRoute(authUser, updatedProfile, ScreenRoute.MainTabs)
             )
         }
@@ -1412,15 +1426,10 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
         val queue = storage.loadSyncQueue(uid)
         val fbUid = runCatching { Firebase.auth.currentUser?.uid }.getOrNull()
         val targetCloudUid = fbUid ?: uid
-
-        // Ensure brand-new users pushing for the first time include all local days and scores
         val isFirstEverSync = queue.lastSyncDay == null
-        val candidateDays = when {
-            isManual -> (queue.dirtyDays + answerLogService.getDistinctDaysForUser(uid))
-            queue.dirtyDays.isNotEmpty() -> queue.dirtyDays
-            isFirstEverSync -> answerLogService.getDistinctDaysForUser(uid)
-            else -> emptySet()
-        }
+        // Only push days that have genuinely unsynced answers or dirty day status
+        val unsyncedDays = answerLogService.getUnsyncedDays(uid)
+        val candidateDays = (queue.dirtyDays + unsyncedDays).toSet()
 
         // If Firebase Auth does not have an active token for this session (e.g., offline/local guest or email session
         // in an environment without anonymous/password provider token), attempt Firestore write if repo is available
@@ -1431,6 +1440,7 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                 val nowMs = System.currentTimeMillis()
                 val answeredCount = candidateDays.sumOf { d -> answerLogService.loadAnswerLogsForDay(uid, d).size }
                     .let { if (it > 0) it else st.rawAnswerLogs.size }
+                answerLogService.markAllAnswersSynced(uid)
                 storage.clearDirtyFlagsAfterSync(
                     syncDay = todayStr,
                     syncedAtMs = nowMs,
@@ -1547,6 +1557,9 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
         }.getOrDefault(false)
         if (committed) {
             val nowMs = System.currentTimeMillis()
+            for (d in candidateDays) {
+                answerLogService.markDayAnswersSynced(uid, d)
+            }
             val syncedOriginalScoreIds = dirtyScores.filter { sc ->
                 val cleanId = sc.id.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(64).ifBlank { "score_${sc.timestamp}" }
                 cleanId in planned.syncedScoreIds
@@ -1612,18 +1625,36 @@ class NumeraViewModel(application: Application) : AndroidViewModel(application) 
                     lastSyncedMs = queue.lastSyncedTimestamp
                 )
             ) {
-                executeBatchSync(uid = uid, isManual = false)
+                runCatching { executeBatchSync(uid = uid, isManual = false) }
             }
             authService.signOut(activityContext)
+            // Wipe user-scoped local caches so fresh login pulls clean authoritative cloud state
+            storage.clearUserLocalData(uid)
+            answerLogService.resetStatistics(uid)
+            storage.setActiveUser("guest")
+
+            val guestSettings = storage.loadSettings("guest")
+            val defaultDaily = loadOrBuildTodayDailyState(todayStr, storage.getOrCreateInstallId(), guestSettings)
+
             _uiState.update {
                 it.copy(
                     isAuthenticated = false,
                     authLoading = false,
                     authError = null,
+                    userProfile = UserProfileState(userId = "guest", isGuest = true),
+                    settings = guestSettings,
+                    dailyState = defaultDaily,
+                    scores = emptyList(),
+                    mistakes = emptyList(),
+                    rawAnswerLogs = emptyList(),
+                    mistakeBook = emptyList(),
+                    syncStatus = SyncStatusState.SYNCED,
+                    pendingSyncItemsCount = 0,
                     route = ScreenRoute.AuthHub(isSignUpMode = false),
                     toastMessage = t("auth.log_out")
                 )
             }
+            refreshAnalyticsState("guest")
         }
     }
 

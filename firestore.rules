@@ -176,13 +176,8 @@ service cloud.firestore {
                          incoming().keys().hasOnly(['userId', 'mode', 'difficulty', 'count', 'correct', 'timeMs', 'accuracy', 'ts', 'createdAt', 'updatedAt']) &&
                          isValidScoreDoc(incoming());
 
-        allow update: if isOwner(userId) &&
-                         isValidId(userId) &&
-                         isValidId(scoreId) &&
-                         (!('createdAt' in existing()) || isGuestActive(existing().createdAt)) &&
-                         isValidScoreDoc(incoming()) &&
-                         incoming().userId == existing().userId &&
-                         incoming().diff(existing()).affectedKeys().hasOnly(['userId', 'mode', 'difficulty', 'count', 'correct', 'timeMs', 'accuracy', 'ts', 'createdAt', 'updatedAt']);
+        // Historical score records are strictly immutable once created.
+        allow update: if false;
 
         allow delete: if false;
       }
